@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pkl
+*.zip
+.idea/
+.vscode/
+.DS_Store
+logs/tensorboard/
+models/checkpoints/
+models/final/
+data/processed/*.csv
+!data/processed/.gitkeep
