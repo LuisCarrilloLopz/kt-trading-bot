@@ -3,9 +3,11 @@ Evaluation callback that:
 - Syncs VecNormalize stats from train env to eval env (no leakage).
 - Rolls out N eval episodes, reconstructs the equity curve from `info['net_worth']`.
 - Logs Sharpe / Sortino / MDD / total return to TensorBoard.
-- Saves `best_model` selected by mean Sharpe (not by mean reward).
+- Saves `best_model` selected by **smoothed** mean Sharpe across the last K evaluations
+  (V1.5+: prevents a single lucky eval from becoming best_model).
 """
 from __future__ import annotations
+import collections
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
@@ -33,7 +35,12 @@ class SharpeEvalCallback(BaseCallback):
         self.eval_freq = max(1, int(eval_freq))
         self.best_model_save_path = Path(best_model_save_path) if best_model_save_path else None
         self.deterministic = deterministic
-        self.best_sharpe = -np.inf
+        # Smoothing — best_model is selected by mean Sharpe of the last K evaluations,
+        # not by a single eval. Avoids one lucky outlier becoming best_model.
+        self.smoothing_window = 5
+        self.sharpe_history: collections.deque[float] = collections.deque(maxlen=self.smoothing_window)
+        self.best_smoothed_sharpe = -np.inf
+        self.peak_unsmoothed_sharpe = -np.inf   # for TB comparison only, not used to save
         if self.best_model_save_path is not None:
             self.best_model_save_path.mkdir(parents=True, exist_ok=True)
 
@@ -58,26 +65,41 @@ class SharpeEvalCallback(BaseCallback):
             returns.append(total_return(equity))
 
         mean_sharpe = float(np.mean(sharpes))
+
+        # Update history (deque keeps only the last `smoothing_window` values).
+        self.sharpe_history.append(mean_sharpe)
+        self.peak_unsmoothed_sharpe = max(self.peak_unsmoothed_sharpe, mean_sharpe)
+
+        # Smoothed metric: only valid once the window is full (warmup).
+        is_warm = len(self.sharpe_history) >= self.smoothing_window
+        smoothed_sharpe = float(np.mean(self.sharpe_history)) if is_warm else float("nan")
+
         self.logger.record("eval/mean_reward", float(np.mean(rewards)))
         self.logger.record("eval/sharpe_ratio", mean_sharpe)
         self.logger.record("eval/sharpe_std", float(np.std(sharpes)))
         self.logger.record("eval/sortino_ratio", float(np.mean(sortinos)))
         self.logger.record("eval/max_drawdown", float(np.mean(mdds)))
         self.logger.record("eval/total_return", float(np.mean(returns)))
+        self.logger.record("eval/sharpe_smoothed_5", smoothed_sharpe)
+        self.logger.record("eval/best_smoothed_sharpe", self.best_smoothed_sharpe)
+        self.logger.record("eval/peak_unsmoothed_sharpe", self.peak_unsmoothed_sharpe)
         if self.verbose:
+            smoothed_str = f"smoothed5={smoothed_sharpe:+.3f}" if is_warm else "smoothed5=warmup"
             print(
                 f"[eval @ {self.num_timesteps}] "
                 f"Sharpe={mean_sharpe:+.3f} (std={np.std(sharpes):.3f})  "
+                f"{smoothed_str}  "
                 f"Return={np.mean(returns) * 100:+.2f}%  MDD={np.mean(mdds) * 100:.2f}%"
             )
 
-        if mean_sharpe > self.best_sharpe:
-            self.best_sharpe = mean_sharpe
+        # Save best_model only when window is full AND smoothed mean strictly improves.
+        if is_warm and smoothed_sharpe > self.best_smoothed_sharpe:
+            self.best_smoothed_sharpe = smoothed_sharpe
             if self.best_model_save_path is not None:
                 self.model.save(str(self.best_model_save_path / "best_model"))
                 self.eval_env.save(str(self.best_model_save_path / "vec_normalize.pkl"))
                 if self.verbose:
-                    print(f"[eval] new best Sharpe={mean_sharpe:+.3f}")
+                    print(f"[eval] new best smoothed_sharpe={smoothed_sharpe:+.3f}")
         return True
 
     def _run_episode(self) -> tuple[np.ndarray, float]:
