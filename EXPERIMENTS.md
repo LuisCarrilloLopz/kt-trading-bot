@@ -322,7 +322,60 @@ Best_models y vec_normalize de V1.0-V1.2 **NO son cargables en V1.3** (obs shape
 
 ---
 
-## Backlog (V1.4+)
+---
+
+## V1.4 — "Feature ablation"
+
+**Fecha:** 2026-05-17
+**Archivos modificados:** `src/envs/trading_env.py` (sólo)
+**Baseline:** V1.3 abortado a 1.24M (logs en `logs/tensorboard/v1.3/`)
+
+### Diagnóstico V1.3 (1.24M steps)
+
+V1.3 añadió 8 features (MACD, MACD_hist, ATR, hour sin/cos, log_ret lag-1/5/10). Resultado: **estrictamente peor que V1.2 en todas las métricas de eval.**
+
+| Métrica último 25% | V1.1 (corregido) | V1.2 | V1.3 |
+|---|---|---|---|
+| `eval/sharpe_ratio` | +0.52 | +0.09 | **−1.63** |
+| `eval/total_return` | +3.4 % | +6.2 % | **−14.7 %** |
+| `eval/max_drawdown` | ~13 % | ~9 % | **28.1 %** |
+| `train/approx_kl` | 0.016 | 0.039 | **0.055** |
+| `train/clip_fraction` | 0.114 | 0.189 | **0.275** |
+
+V1.3 confirma que **el bottleneck no era información**. Más features → más espacio para correlaciones espurias en train que no generalizan a eval.
+
+### Cambio quirúrgico
+
+| Feature | Mantener | Por qué |
+|---|---|---|
+| `macd_norm`, `macd_hist_norm` | ✅ | Momentum indicador — info real no presente en V1.2 |
+| `atr_norm` | ✅ | Volatilidad realizada — complementa `market_vol` |
+| `hour_sin`, `hour_cos` | ❌ | Cripto opera 24/7, sin sesiones; baja probabilidad de seasonality intradía explotable |
+| `log_ret_lag1/5/10` | ❌ | El LSTM ya mantiene memoria temporal; los lags eran redundantes |
+
+**Resultado:** 13 features (10 V1.2 + 3 indicadores nuevos).
+
+El `loader.py` sigue calculando las 18 features (sin coste de cómputo significativo). El cambio es **sólo en el env** — `_get_observation()` ahora selecciona 13 columnas. Esto permite ablations futuras sin tocar el data pipeline.
+
+### Hipótesis a validar
+
+| Resultado V1.4 | Interpretación |
+|---|---|
+| Sharpe ≥ V1.2 (>+0.09 último 25%) | MACD/ATR sí aportan; hour+lags eran ruido. **Validado.** |
+| Sharpe ≈ V1.3 (~−1.5) | MACD/ATR también eran ruido. Las 10 features V1.2 eran el techo. |
+| Sharpe entre V1.2 y V1.3 | Resultado mixto — MACD/ATR ayudan pero no compensan el daño del LR alto. → V1.5 con LR bajado. |
+| Sharpe > V1.1 (>+0.52) | Mejor que cualquier versión previa. Pasar a backtest 2025. |
+
+### Mismo todo lo demás
+
+- Arquitectura: `lstm_hidden=256`, `net_arch.vf=[128,128]`, `vf_coef=1.0`
+- Reward: `100*log_ret − 20*Δdrawdown − 0.05*pos_change`
+- Hyperparams: `LR=3e-4→0`, `n_steps=4096`, `batch=256`, `MAX_EPISODE_STEPS=2000`
+- Datos: BTC+ETH hourly, split año<2025 80/20, backtest año≥2025
+
+---
+
+## Backlog (V1.5+)
 
 ### Prioridad 1
 - [ ] **Multi-seed runs** — entrenar con seeds {13, 42, 77} y reportar media ± std de Sharpe en eval. PPO tiene varianza brutal entre seeds; un solo run no es señal.

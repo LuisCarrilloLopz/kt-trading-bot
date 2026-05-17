@@ -13,7 +13,7 @@ from src.core.config import (
     REWARD_LOG_RET_SCALE, REWARD_DRAWDOWN_COEF, REWARD_CHURN_COEF, REWARD_CLIP,
 )
 
-N_FEATURES = 18   # V1.3: 10 → 18 (añadidas MACD, MACD_hist, ATR, hour sin/cos, log_ret lags 1/5/10)
+N_FEATURES = 13   # V1.4: 18 → 13 (ablation — quitadas hour sin/cos y log_ret lags 1/5/10 por sospecha de ruido; MACD/MACD_hist/ATR retenidas)
 
 
 class MultiAssetTradingEnv(gym.Env):
@@ -126,18 +126,11 @@ class MultiAssetTradingEnv(gym.Env):
             position_value / INITIAL_BALANCE,
             unrealized_pnl / INITIAL_BALANCE,
             drawdown,
-            # V1.3 — momentum
+            # V1.3+ retenidas — momentum y volatilidad realizada
             float(row["macd_norm"]),
             float(row["macd_hist_norm"]),
-            # V1.3 — volatilidad
             float(row["atr_norm"]),
-            # V1.3 — temporales
-            float(row["hour_sin"]),
-            float(row["hour_cos"]),
-            # V1.3 — lagged returns
-            float(row["log_ret_lag1"]),
-            float(row["log_ret_lag5"]),
-            float(row["log_ret_lag10"]),
+            # V1.4 — quitadas: hour_sin/cos (cripto 24/7) y log_ret_lag1/5/10 (LSTM ya mantiene memoria)
         ], dtype=np.float32)
         return np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
 
