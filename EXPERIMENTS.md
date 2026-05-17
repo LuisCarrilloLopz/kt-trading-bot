@@ -220,7 +220,9 @@ El log V1.0 se conserva en `logs/tensorboard/v1.0-broken-dd/` para comparar cont
 - `train/value_loss` doblado: 0.10 → 0.24
 - `train/entropy_loss` recuperó: -0.18 → -0.42 (re-exploración tras colapso de modo)
 
-**Backtest 2025 (datos no vistos, ~3 meses):**
+**Backtest 2025 (datos no vistos, ~11.5 meses — 8236 velas horarias BTC / 8436 ETH):**
+
+> Nota: En el momento del backtest, el script reportaba "2.82 meses" y CAGRs absurdos (−50%, −95%) porque el código asumía velas de 15min (`CANDLES_PER_YEAR_15M=35040`). El bug fue detectado al inspeccionar los datos y corregido a `CANDLES_PER_YEAR=8760` antes de V1.2. Los **retornos totales, MDD y position mix** de la tabla siguen siendo correctos (no dependen del candles_per_year); sólo el Sharpe anualizado (no listado aquí) estaba inflado ×√4=2.
 
 | | best_model BTC | best_model ETH | last_ckpt BTC | last_ckpt ETH |
 |---|---|---|---|---|
