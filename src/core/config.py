@@ -59,3 +59,25 @@ NET_ARCH = dict(pi=[64, 64], vf=[128, 128])   # V1.2: vf [64,64] → [128,128]
 TOTAL_TIMESTEPS = 3_000_000
 RANDOM_SEED = 42
 N_EVAL_EPISODES = 5
+
+# --- Walk-forward validation (V2.0) ---
+WALK_FORWARD_TIMESTEPS = 1_500_000  # Por fold; aprox mitad de TOTAL_TIMESTEPS
+
+# Folds: (train_start, train_end, eval_start, eval_end) — todas inclusive, formato YYYY-MM-DD
+FOLDS: list[tuple[str, str, str, str]] = [
+    ("2019-01-21", "2020-12-31", "2021-01-01", "2021-06-30"),  # Fold 1
+    ("2019-07-01", "2021-06-30", "2021-07-01", "2021-12-31"),  # Fold 2
+    ("2020-01-01", "2021-12-31", "2022-01-01", "2022-06-30"),  # Fold 3
+    ("2020-07-01", "2022-06-30", "2022-07-01", "2022-12-31"),  # Fold 4
+    ("2021-01-01", "2022-12-31", "2023-01-01", "2023-06-30"),  # Fold 5
+    ("2021-07-01", "2023-06-30", "2023-07-01", "2023-12-31"),  # Fold 6
+    ("2022-01-01", "2023-12-31", "2024-01-01", "2024-06-30"),  # Fold 7
+    ("2022-07-01", "2024-06-30", "2024-07-01", "2024-12-31"),  # Fold 8
+    ("2023-01-01", "2024-12-31", "2025-01-01", "2025-06-30"),  # Fold 9
+]
+
+# Holdout final — NO usar para selección ni iteración. Solo backtest final del candidato.
+FINAL_HOLDOUT_START = "2025-07-01"
+FINAL_HOLDOUT_END   = "2026-01-31"   # Ajustar si la data se extiende
+
+WALK_FORWARD_RUN_NAME = "walk_forward_v1"

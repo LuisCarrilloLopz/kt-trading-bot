@@ -58,10 +58,33 @@ def _engineer(df_raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_assets(split: str = "train") -> dict[str, pd.DataFrame]:
-    """Return {asset_name: dataframe} ready for the env, sliced by split."""
-    if split not in ("train", "eval"):
-        raise ValueError(f"split must be 'train' or 'eval', got {split!r}")
+def load_assets(
+    split: str = "train",
+    date_range: tuple[str, str] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Return {asset_name: dataframe} ready for the env.
+
+    Two modes (mutually exclusive in practice):
+    - **Legacy (date_range=None):** uses ``split="train"|"eval"`` over the 80/20
+      chronological split of pre-2025 data. Backwards-compatible behavior.
+    - **Date range (date_range=("YYYY-MM-DD", "YYYY-MM-DD")):** ignores ``split``,
+      returns rows whose timestamp is inclusively within the given range. Used by
+      the walk-forward framework (V2.0+).
+
+    Feature engineering (rolling indicators, lags) runs on the **full** CSV before
+    any filtering, so warm-up history pre-fold is preserved and features at the
+    first row of each fold are valid (no NaN warmup region).
+    """
+    if date_range is None:
+        if split not in ("train", "eval"):
+            raise ValueError(f"split must be 'train' or 'eval', got {split!r}")
+    else:
+        if len(date_range) != 2 or not all(isinstance(x, str) for x in date_range):
+            raise ValueError(f"date_range must be (start_str, end_str), got {date_range!r}")
+        start_ts = pd.Timestamp(date_range[0])
+        end_ts = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        # 'inclusive' interpreted as full day: end_ts is 23:59:59 of end date.
+
     out: dict[str, pd.DataFrame] = {}
     for name, path in ASSETS.items():
         if not path.exists():
@@ -69,10 +92,20 @@ def load_assets(split: str = "train") -> dict[str, pd.DataFrame]:
         df_raw = pd.read_csv(path)
         df_raw["T"] = pd.to_datetime(df_raw["T"])
         df_raw = df_raw.sort_values("T").reset_index(drop=True)
-        df_raw = df_raw[df_raw["T"].dt.year < TRAIN_YEAR_MAX].reset_index(drop=True)
-        df = _engineer(df_raw)
-        split_idx = int(len(df) * TRAIN_SPLIT)
-        df = (df.iloc[:split_idx] if split == "train" else df.iloc[split_idx:]).reset_index(drop=True)
+
+        if date_range is None:
+            # Legacy path: filter then engineer (back-compat exact).
+            df_raw = df_raw[df_raw["T"].dt.year < TRAIN_YEAR_MAX].reset_index(drop=True)
+            df = _engineer(df_raw)
+            split_idx = int(len(df) * TRAIN_SPLIT)
+            df = (df.iloc[:split_idx] if split == "train" else df.iloc[split_idx:]).reset_index(drop=True)
+        else:
+            # Walk-forward path: engineer on FULL data (preserves warm-up),
+            # then filter by date_range. CSV already includes pre-2019 history
+            # used to warm up MA200/RSI/Bollinger/MACD (verified P0.2).
+            df = _engineer(df_raw)
+            df = df[(df["T"] >= start_ts) & (df["T"] <= end_ts)].reset_index(drop=True)
+
         missing = [c for c in FEATURE_COLS if c not in df.columns]
         if missing:
             raise ValueError(f"Missing columns for {name}: {missing}")

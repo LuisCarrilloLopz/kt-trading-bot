@@ -1,6 +1,15 @@
-"""Train RecurrentPPO on the multi-asset (BTC + ETH) trading env."""
+"""Train RecurrentPPO on the multi-asset (BTC + ETH) trading env.
+
+Two modes:
+- Default (no --fold): legacy single train/eval 80/20 chronological split.
+- Walk-forward (--fold N, N in 1..9): trains on the N-th fold's date_range from
+  config.FOLDS, using config.WALK_FORWARD_TIMESTEPS as the default budget,
+  output dirs under <CHECKPOINT_DIR>/walk_forward_v1/fold_N/.
+"""
 from __future__ import annotations
 import argparse
+import json
+import time
 
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.utils import set_random_seed
@@ -23,15 +32,47 @@ def _make_env(dfs, randomize_start: bool):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=cfg.RANDOM_SEED)
-    parser.add_argument("--total-timesteps", type=int, default=cfg.TOTAL_TIMESTEPS)
-    parser.add_argument("--run-name", type=str, default="v1")
+    parser.add_argument("--total-timesteps", type=int, default=None,
+                        help="Override timesteps. Default: TOTAL_TIMESTEPS or "
+                             "WALK_FORWARD_TIMESTEPS when --fold is set.")
+    parser.add_argument("--run-name", type=str, default=None,
+                        help="Override run name. Default: 'v1' or 'walk_forward_v1/fold_N' "
+                             "when --fold is set.")
+    parser.add_argument("--fold", type=int, default=None,
+                        help="Walk-forward fold index (1..len(FOLDS)). If set, "
+                             "loads train/eval from FOLDS[fold-1] date ranges.")
     args = parser.parse_args()
 
-    print(f"--- kt-trading-bot — run='{args.run_name}' seed={args.seed} ---")
+    # --- Resolve walk-forward parameters ---
+    if args.fold is not None:
+        if not (1 <= args.fold <= len(cfg.FOLDS)):
+            parser.error(f"--fold must be in 1..{len(cfg.FOLDS)}, got {args.fold}")
+        fold_spec = cfg.FOLDS[args.fold - 1]
+        train_range = (fold_spec[0], fold_spec[1])
+        eval_range = (fold_spec[2], fold_spec[3])
+        if args.total_timesteps is None:
+            args.total_timesteps = cfg.WALK_FORWARD_TIMESTEPS
+        if args.run_name is None:
+            args.run_name = f"{cfg.WALK_FORWARD_RUN_NAME}/fold_{args.fold}"
+    else:
+        if args.total_timesteps is None:
+            args.total_timesteps = cfg.TOTAL_TIMESTEPS
+        if args.run_name is None:
+            args.run_name = "v1"
+
+    print(f"--- kt-trading-bot — run='{args.run_name}' seed={args.seed} "
+          f"timesteps={args.total_timesteps} fold={args.fold} ---")
     set_random_seed(args.seed)
 
-    train_dfs = load_assets(split="train")
-    eval_dfs = load_assets(split="eval")
+    if args.fold is not None:
+        print(f"WALK-FORWARD fold {args.fold}:")
+        print(f"  train: {train_range[0]} → {train_range[1]}")
+        print(f"  eval:  {eval_range[0]} → {eval_range[1]}")
+        train_dfs = load_assets(date_range=train_range)
+        eval_dfs = load_assets(date_range=eval_range)
+    else:
+        train_dfs = load_assets(split="train")
+        eval_dfs = load_assets(split="eval")
     print(f"train sizes: { {k: len(v) for k, v in train_dfs.items()} }")
     print(f"eval  sizes: { {k: len(v) for k, v in eval_dfs.items()} }")
 
@@ -103,15 +144,45 @@ def main():
         tensorboard_log=str(run_log_dir),
     )
 
+    t_start = time.time()
     model.learn(
         total_timesteps=args.total_timesteps,
         callback=[eval_cb, ent_cb, ckpt_cb],
         tb_log_name="run",
     )
+    elapsed = time.time() - t_start
 
     model.save(str(run_final_dir / "ppo_lstm"))
     env_train.save(str(run_final_dir / "vec_normalize.pkl"))
-    print("--- training complete ---")
+
+    if args.fold is not None:
+        # Persist final eval summary for walk-forward orchestrator/report.
+        eval_metrics = {
+            "fold": args.fold,
+            "train_start": train_range[0],
+            "train_end": train_range[1],
+            "eval_start": eval_range[0],
+            "eval_end": eval_range[1],
+            "best_smoothed_sharpe": (
+                float(eval_cb.best_smoothed_sharpe)
+                if eval_cb.best_smoothed_sharpe != float("-inf") else None
+            ),
+            "peak_unsmoothed_sharpe": (
+                float(eval_cb.peak_unsmoothed_sharpe)
+                if eval_cb.peak_unsmoothed_sharpe != float("-inf") else None
+            ),
+            "total_timesteps": int(args.total_timesteps),
+            "elapsed_seconds": float(elapsed),
+            "seed": int(args.seed),
+            "smoothing_window": int(eval_cb.smoothing_window),
+            "best_model_saved": (run_ckpt_dir / "best_model.zip").exists(),
+        }
+        out_path = run_final_dir / "eval_metrics.json"
+        with open(out_path, "w") as f:
+            json.dump(eval_metrics, f, indent=2)
+        print(f"[fold {args.fold}] eval_metrics.json saved → {out_path}")
+
+    print(f"--- training complete ({elapsed:.1f}s) ---")
 
 
 if __name__ == "__main__":
