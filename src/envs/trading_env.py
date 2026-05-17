@@ -85,6 +85,12 @@ class MultiAssetTradingEnv(gym.Env):
         self.entry_price = 0.0
         self.position_size = 0.0
 
+        # Reward decomposition accumulators (V1.5+): emitted in info on episode end.
+        self._r_log_ret_cum = 0.0
+        self._r_dd_cum = 0.0
+        self._r_churn_cum = 0.0
+        self._r_clipped_cum = 0.0
+
         return self._get_observation(), {"asset": self.current_asset}
 
     # -------------------------------------------------------------- accessors
@@ -159,12 +165,18 @@ class MultiAssetTradingEnv(gym.Env):
         new_drawdown = max(0.0, drawdown - self.prev_drawdown)
         self.prev_drawdown = drawdown
         position_changed = float(target_dir != prev_position)
-        reward = (
-            REWARD_LOG_RET_SCALE * log_ret
-            - REWARD_DRAWDOWN_COEF * new_drawdown
-            - REWARD_CHURN_COEF * position_changed
-        )
-        reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+
+        # Reward components (pre-clip) — exposed via info on episode end for diagnostics.
+        r_log_ret = REWARD_LOG_RET_SCALE * log_ret
+        r_dd      = -REWARD_DRAWDOWN_COEF * new_drawdown
+        r_churn   = -REWARD_CHURN_COEF * position_changed
+        reward_unclipped = r_log_ret + r_dd + r_churn
+        reward = float(np.clip(reward_unclipped, -REWARD_CLIP, REWARD_CLIP))
+
+        self._r_log_ret_cum += r_log_ret
+        self._r_dd_cum      += r_dd
+        self._r_churn_cum   += r_churn
+        self._r_clipped_cum += reward
 
         terminated = False
         truncated = False
@@ -187,6 +199,11 @@ class MultiAssetTradingEnv(gym.Env):
             "drawdown": drawdown,
             "leverage": leverage,
         }
+        if terminated or truncated:
+            info["ep_r_log_ret"] = self._r_log_ret_cum
+            info["ep_r_dd"]      = self._r_dd_cum
+            info["ep_r_churn"]   = self._r_churn_cum
+            info["ep_r_clipped"] = self._r_clipped_cum
         return self._get_observation(), reward, terminated, truncated, info
 
     # ----------------------------------------------------------- transitions
