@@ -125,6 +125,16 @@ def main():
         for fold, phase, rc in summary:
             status = "OK" if rc == 0 else f"FAIL(rc={rc})"
             logger.log(f"  fold {fold:>2} {phase:>10}: {status}")
+
+        # Auto-generate aggregate report (runs even on partial failure → partial
+        # report is more useful than no report).
+        logger.log("\n===== generating aggregate_report.md =====")
+        try:
+            from src.walk_forward_report import main as generate_report
+            generate_report()
+            logger.log("✓ aggregate_report.md + aggregate_report.csv generated")
+        except Exception as e:
+            logger.log(f"⚠ report generation failed: {e!r}")
         logger.close()
 
 

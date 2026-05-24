@@ -10,6 +10,7 @@ from src.core.config import (
     TRADING_FEE, INITIAL_BALANCE, VOL_LOOKBACK, TARGET_VOL_PER_STEP,
     LEVERAGE_MIN, LEVERAGE_MAX, MAX_ALLOCATION, MIN_TRADE_USD,
     RUIN_THRESHOLD, MAX_EPISODE_STEPS,
+    REWARD_MODE,
     REWARD_LOG_RET_SCALE, REWARD_DRAWDOWN_COEF, REWARD_CHURN_COEF, REWARD_CLIP,
 )
 
@@ -21,9 +22,17 @@ class MultiAssetTradingEnv(gym.Env):
     Actions: 0=SHORT, 1=NEUTRAL, 2=LONG.
 
     Reward (per step):
-        REWARD_LOG_RET_SCALE * log(nw_t / nw_{t-1})
-      - REWARD_DRAWDOWN_COEF * max(0, drawdown - prev_drawdown)
-      - REWARD_CHURN_COEF    * 1[position changed]
+        r_ret  =  REWARD_LOG_RET_SCALE * log_ret_term   (term depends on REWARD_MODE)
+              -  REWARD_DRAWDOWN_COEF  * max(0, drawdown - prev_drawdown)
+              -  REWARD_CHURN_COEF     * 1[position changed]
+
+    REWARD_MODE selects the log_ret_term:
+      - "absolute" (V1 baseline): log(nw_t / nw_{t-1})
+      - "excess"   (V2):          log(nw_t / nw_{t-1}) - log_ret_BH
+
+    The accumulator/info field is named "excess_ret" historically; it carries
+    whichever term the active mode selects, so the decomposition callback
+    works unchanged.
 
     The DD term is **derivative**: it fires only on new drawdown, not on
     existing drawdown. Total DD penalty per episode is bounded by
@@ -86,7 +95,7 @@ class MultiAssetTradingEnv(gym.Env):
         self.position_size = 0.0
 
         # Reward decomposition accumulators (V1.5+): emitted in info on episode end.
-        self._r_log_ret_cum = 0.0
+        self._r_excess_ret_cum = 0.0
         self._r_dd_cum = 0.0
         self._r_churn_cum = 0.0
         self._r_clipped_cum = 0.0
@@ -159,7 +168,15 @@ class MultiAssetTradingEnv(gym.Env):
         self.net_worth = float(np.clip(self.cash + self._position_value(price), 1.0, 1e8))
         self.peak_net_worth = max(self.peak_net_worth, self.net_worth)
 
-        log_ret = float(np.clip(np.log(self.net_worth / max(prev_net_worth, 1e-6)), -0.2, 0.2))
+        log_ret_strategy = float(np.clip(np.log(self.net_worth / max(prev_net_worth, 1e-6)), -0.2, 0.2))
+        # log_ret_BH (backward-looking log return of the asset price, pre-computed
+        # in the loader and clipped to ±0.15) is only used when REWARD_MODE="excess".
+        if REWARD_MODE == "excess":
+            log_ret_BH = float(row["log_ret"])
+            log_ret_term = log_ret_strategy - log_ret_BH
+        else:  # "absolute" — V1 baseline
+            log_ret_term = log_ret_strategy
+
         drawdown = (self.peak_net_worth - self.net_worth) / self.peak_net_worth \
             if self.peak_net_worth > 0 else 0.0
         new_drawdown = max(0.0, drawdown - self.prev_drawdown)
@@ -167,16 +184,18 @@ class MultiAssetTradingEnv(gym.Env):
         position_changed = float(target_dir != prev_position)
 
         # Reward components (pre-clip) — exposed via info on episode end for diagnostics.
-        r_log_ret = REWARD_LOG_RET_SCALE * log_ret
+        # `r_excess` keeps the historical name for callback back-compat; it carries
+        # the return term selected by the active REWARD_MODE.
+        r_excess  = REWARD_LOG_RET_SCALE * log_ret_term
         r_dd      = -REWARD_DRAWDOWN_COEF * new_drawdown
         r_churn   = -REWARD_CHURN_COEF * position_changed
-        reward_unclipped = r_log_ret + r_dd + r_churn
+        reward_unclipped = r_excess + r_dd + r_churn
         reward = float(np.clip(reward_unclipped, -REWARD_CLIP, REWARD_CLIP))
 
-        self._r_log_ret_cum += r_log_ret
-        self._r_dd_cum      += r_dd
-        self._r_churn_cum   += r_churn
-        self._r_clipped_cum += reward
+        self._r_excess_ret_cum += r_excess
+        self._r_dd_cum         += r_dd
+        self._r_churn_cum      += r_churn
+        self._r_clipped_cum    += reward
 
         terminated = False
         truncated = False
@@ -200,7 +219,7 @@ class MultiAssetTradingEnv(gym.Env):
             "leverage": leverage,
         }
         if terminated or truncated:
-            info["ep_r_log_ret"] = self._r_log_ret_cum
+            info["ep_r_excess_ret"] = self._r_excess_ret_cum
             info["ep_r_dd"]      = self._r_dd_cum
             info["ep_r_churn"]   = self._r_churn_cum
             info["ep_r_clipped"] = self._r_clipped_cum

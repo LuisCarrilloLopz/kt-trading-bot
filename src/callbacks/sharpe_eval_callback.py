@@ -56,7 +56,7 @@ class SharpeEvalCallback(BaseCallback):
             self.eval_env.ret_rms = deepcopy(self.train_env_ref.ret_rms)
 
         rewards, sharpes, sortinos, mdds, returns = [], [], [], [], []
-        comp_log_ret, comp_dd, comp_churn, comp_clipped = [], [], [], []
+        comp_excess_ret, comp_dd, comp_churn, comp_clipped = [], [], [], []
         for _ in range(self.n_eval_episodes):
             equity, total_r, last_info = self._run_episode()
             rewards.append(total_r)
@@ -64,7 +64,7 @@ class SharpeEvalCallback(BaseCallback):
             sortinos.append(sortino_ratio(equity))
             mdds.append(max_drawdown(equity))
             returns.append(total_return(equity))
-            comp_log_ret.append(float(last_info.get("ep_r_log_ret", 0.0)))
+            comp_excess_ret.append(float(last_info.get("ep_r_excess_ret", 0.0)))
             comp_dd.append(float(last_info.get("ep_r_dd", 0.0)))
             comp_churn.append(float(last_info.get("ep_r_churn", 0.0)))
             comp_clipped.append(float(last_info.get("ep_r_clipped", 0.0)))
@@ -89,26 +89,26 @@ class SharpeEvalCallback(BaseCallback):
         self.logger.record("eval/best_smoothed_sharpe", self.best_smoothed_sharpe)
         self.logger.record("eval/peak_unsmoothed_sharpe", self.peak_unsmoothed_sharpe)
 
-        # Reward decomposition (V1.5+): mean per-episode component sums across N_EVAL_EPISODES.
-        mean_r_log_ret = float(np.mean(comp_log_ret))
-        mean_r_dd      = float(np.mean(comp_dd))
-        mean_r_churn   = float(np.mean(comp_churn))
-        mean_r_clipped = float(np.mean(comp_clipped))
-        abs_log = abs(mean_r_log_ret)
-        abs_dd  = abs(mean_r_dd)
-        abs_ch  = abs(mean_r_churn)
-        denom = abs_log + abs_dd + abs_ch
+        # Reward decomposition (V1.5+; V2 uses excess return vs B&H instead of raw log_ret).
+        mean_r_excess_ret = float(np.mean(comp_excess_ret))
+        mean_r_dd         = float(np.mean(comp_dd))
+        mean_r_churn      = float(np.mean(comp_churn))
+        mean_r_clipped    = float(np.mean(comp_clipped))
+        abs_excess = abs(mean_r_excess_ret)
+        abs_dd     = abs(mean_r_dd)
+        abs_ch     = abs(mean_r_churn)
+        denom = abs_excess + abs_dd + abs_ch
         if denom > 1e-8:
-            share_log = abs_log / denom
-            share_dd  = abs_dd / denom
-            share_ch  = abs_ch / denom
+            share_excess = abs_excess / denom
+            share_dd     = abs_dd / denom
+            share_ch     = abs_ch / denom
         else:
-            share_log = share_dd = share_ch = float("nan")
-        self.logger.record("eval/r_log_ret_mean", mean_r_log_ret)
+            share_excess = share_dd = share_ch = float("nan")
+        self.logger.record("eval/r_excess_ret_mean", mean_r_excess_ret)
         self.logger.record("eval/r_dd_mean", mean_r_dd)
         self.logger.record("eval/r_churn_mean", mean_r_churn)
         self.logger.record("eval/r_clipped_mean", mean_r_clipped)
-        self.logger.record("eval/r_log_ret_share", share_log)
+        self.logger.record("eval/r_excess_ret_share", share_excess)
         self.logger.record("eval/r_dd_share", share_dd)
         self.logger.record("eval/r_churn_share", share_ch)
         if self.verbose:

@@ -33,6 +33,13 @@ RUIN_THRESHOLD = 0.5
 MAX_EPISODE_STEPS = 2000   # V1.2: 4000 → 2000 (velas horarias → ~3 meses por episodio)
 
 # --- Reward ---
+# REWARD_MODE selects the return component (everything else stays the same):
+#   "absolute": V1 baseline → REWARD_LOG_RET_SCALE * log_ret_strategy
+#   "excess":   V2          → REWARD_LOG_RET_SCALE * (log_ret_strategy - log_ret_BH)
+# The accumulator / info field / TB metric keep the historical "excess_ret" label
+# so the decomposition callback works unchanged; the value carries whichever mode
+# is active.
+REWARD_MODE = "absolute"
 REWARD_LOG_RET_SCALE = 100.0
 REWARD_DRAWDOWN_COEF = 20.0   # V1.1: applied to derivative DD (one-shot per new DD), not chronic. Coef raised to compensate.
 REWARD_CHURN_COEF = 0.05
@@ -80,4 +87,4 @@ FOLDS: list[tuple[str, str, str, str]] = [
 FINAL_HOLDOUT_START = "2025-07-01"
 FINAL_HOLDOUT_END   = "2026-01-31"   # Ajustar si la data se extiende
 
-WALK_FORWARD_RUN_NAME = "walk_forward_v1"
+WALK_FORWARD_RUN_NAME = "walk_forward_v2"

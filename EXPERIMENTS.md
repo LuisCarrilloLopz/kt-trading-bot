@@ -377,6 +377,144 @@ El `loader.py` sigue calculando las 18 features (sin coste de cómputo significa
 
 ---
 
+---
+
+## V2.1 + V2.2 — RL ceiling (reward shaping y BC pretrain agotados)
+
+**Fecha:** 2026-05-23 / 2026-05-24
+**Archivos añadidos:** `src/bc_teacher.py`, `src/bc_pretrain.py`, `src/bc_finetune.py`, `src/evaluate_oos.py`
+**Archivos modificados:** `src/core/config.py` (`REWARD_MODE`), `src/envs/trading_env.py` (branch reward), `src/callbacks/sharpe_eval_callback.py` (rename métricas en V2.1)
+**Baseline a batir:** walk-forward V2.0 fold 9 (`walk_forward_v1/`).
+**Artefactos preservados:** `models/{checkpoints,final}/walk_forward_v2/fold_9/` y `models/{checkpoints,final}/bc_v1/fold_9/` — NO borrar; son la evidencia de las dos hipótesis falladas.
+
+### Punto de partida — diagnóstico walk-forward V2.0
+
+Walk-forward V2.0 (9 folds × 1.5M, reward V1) y OOS extendido del fold 9 sobre todo 2025 + Q1 2026 dieron:
+
+- **BTC:** defensivo robusto regime-agnóstico (+7% absoluto en 13 meses, +12pp vs B&H, MDD ⅓ del benchmark).
+- **ETH:** roto (-24.8% absoluto). Shortea bulls de ETH (May/Jul/Ago 2025) catastróficamente.
+
+Patrón identificado: el reward V1 (`100·log_ret_strategy − 20·ΔDD − 0.05·churn`) no penaliza NEUTRAL en bulls (reward=0=sin riesgo) → el agente lo prefiere a tomar riesgo direccional. En BTC eso es defensivo robusto; en ETH la combinación de NEUTRAL como refugio + correlación espuria con BTC produce shorts catastróficos en rallies fuertes.
+
+Dos hipótesis para romper el ceiling V1:
+- **H1 (V2.1):** cambiar la **función de recompensa** para que el baseline sea B&H en vez de cero (excess return) → la policy se ve forzada a evaluar cada decisión contra el coste de oportunidad.
+- **H2 (V2.2):** cambiar la **inicialización** del actor con behavioral cloning sobre un profesor trend-following + fine-tune RL → romper el local minimum NEUTRAL desde otro punto del espacio de policies.
+
+### V2.1 — Reward shaping con excess return
+
+**Cambio:**
+```python
+# V1:  r_ret = 100 · log_ret_strategy
+# V2.1: r_ret = 100 · (log_ret_strategy - log_ret_BH)
+```
+DD y churn iguales. Comportamientos esperados:
+- LONG en bull → r_ret ≈ 0 (matchea B&H)
+- NEUTRAL en bull → r_ret < 0 (te quedas atrás)
+- SHORT en bear → r_ret > 0 (bates B&H)
+- SHORT en bull → r_ret << 0 (pierdes Y te quedas atrás) → debería atacar el fallo ETH
+
+**Trial:** fold 9, 1.5M steps, 9h17m wall-clock (con I/O sano, sería ~2h; OneDrive sync triplicó por checkpoint).
+
+**Resultado (best_model @120k):**
+
+| | v1 fold 9 | V2.1 fold 9 | Δ |
+|---|---|---|---|
+| BTC return | +8.14% | +4.70% | -3.44pp |
+| BTC sharpe | +0.97 | +0.38 | -0.59 |
+| BTC MDD | 9.9% | 16.3% | +6.4pp peor |
+| BTC L/N/S | 4/79/17 | 18/53/29 | -26pp NEUTRAL ✓ |
+| ETH return | +32.69% | +26.47% | -6.22pp |
+| ETH sharpe | +1.76 | +1.09 | -0.67 |
+| ETH MDD | 19.9% | 23.6% | +3.7pp peor |
+| ETH L/N/S | 14/55/31 | 39/36/25 | -19pp NEUTRAL ✓ |
+
+**Mean NEUTRAL: 44.5% (vs 67% en V1) → el reward cambia el comportamiento como se diseñó.**
+
+**PERO:** la nueva policy es peor en TODAS las métricas (return, Sharpe, MDD) en BTC y ETH. La actividad direccional añadida no añade valor — lo quita.
+
+**Diagnóstico desde TB:**
+- Pico smoothed5=+1.45 @120k, después degradación monotónica hasta -1.75 @1.5M.
+- `r_excess_ret_share` muy volátil (0.01–0.60). En el pico era 0.014 → DD+churn dominaban el gradiente, no el excess return. El reward shape no es lo que parece.
+- Crítico converge perfectamente (EV 0.11 → 0.85). El crítico aprende, la policy no.
+- Hipótesis: reward más ruidoso (`strategy − BH` tiene más varianza que `strategy`) + optimización contra target móvil (BH varía cada step) → el modelo no puede "anchor" a NEUTRAL como punto neutral.
+
+### V2.2 — Behavioral cloning + fine-tune con reward V1
+
+**Profesor causal (trend-following + overlay):**
+```python
+above_ma200 := dist_ma200 > 1.0
+macd_up     := macd_hist_norm > 0
+if above_ma200 and macd_up:        label = LONG
+elif not above_ma200 and not macd_up: label = SHORT
+else:                              label = NEUTRAL
+
+# Overlay (override):
+trailing_ret_24h := C[t]/C[t-24] - 1.0     # estrictamente causal
+if trailing_ret_24h < -0.03:       label = SHORT
+```
+
+Distribución del profesor sobre train fold 9: BTC 25 L / 51 N / 24 S, ETH 24 L / 47 N / 30 S.
+
+**BC pretrain (T1-T3):**
+- 12921 (obs, action) pairs (trayectoria realista con env step, no labels aisladas).
+- 8 epochs supervised loop sobre actor + lstm_actor (crítico fresh), CE loss + grad clip.
+- Resultado: CE 0.84 → 0.20, policy match teacher ±2.3pp por clase. **ACCEPTANCE PASS.**
+- 22s wall-clock.
+
+**Fine-tune PPO (T4): REWARD_MODE=absolute, LR=1e-4 (vs 3e-4), ent_coef 0.01→0.001 (vs 0.05→0.005), 400k steps, output `bc_v1/fold_9/`.**
+- Monitor inline (`ActionDistributionMonitor`): si `rollout/pct_neutral > 85%` por 3 rollouts consecutivos → STOP.
+
+**Resultado:**
+- Peak smoothed5 = +0.905 @70k (best_model saved). Peak unsmoothed +1.638 @140k.
+- **STOP triggered @220k** por colapso NEUTRAL: 85.4 → ... → 88.3 (3 consecutivos).
+- 18 min wall-clock (con OneDrive pausado → 200 fps, no 17).
+
+**Evaluación del best_model @70k (antes del colapso):**
+
+| | v1 fold 9 | V2.2 fold 9 | Δ |
+|---|---|---|---|
+| BTC return | +8.14% | +3.36% | -4.78pp |
+| BTC sharpe | +0.97 | +0.34 | -0.63 |
+| BTC MDD | 9.9% | 13.7% | +3.8pp peor |
+| BTC L/N/S | 4/79/17 | 7/71/22 | leve shift |
+| ETH return | +32.69% | +9.89% | -22.80pp |
+| ETH sharpe | +1.76 | +0.53 | -1.23 |
+| ETH MDD | 19.9% | 21.1% | +1.2pp peor |
+| ETH L/N/S | 14/55/31 | 12/60/28 | casi igual a v1 |
+
+**Dos señales negativas convergen:**
+
+1. **El best_model (capturado @70k, ANTES del colapso) ya era peor que V1** en ambos activos. La init BC se erosionó rápido bajo el gradient de V1.
+2. **El colapso a NEUTRAL >85% confirma la gravedad de NEUTRAL bajo reward absolute**: aunque el reward V1 no penaliza NEUTRAL explícitamente, la combinación DD + churn + reward clip lo hace el local minimum dominante. La init BC no aguanta más de ~70k steps de PPO antes de empezar a deslizarse.
+
+Action distribution BC eval ≈ V1 (BTC 7/71/22 vs 4/79/17; ETH 12/60/28 vs 14/55/31) — la "gravedad" disuelve la diferenciación del teacher (24/47/30 vs lo que acabó haciendo).
+
+### Conclusión — RL ceiling reached
+
+| Hipótesis | Predicción | Resultado |
+|---|---|---|
+| H1 reward shaping (V2.1) | Romper NEUTRAL → mejorar perf | Rompe NEUTRAL ✓, perf peor ✗ |
+| H2 init BC (V2.2) | Romper NEUTRAL desde init → mejorar perf | Rompe NEUTRAL parcial, perf peor, colapso bajo fine-tune |
+
+Ni el reward ni la inicialización dentro del marco RL actual produjeron una policy mejor que el baseline V1. **El cuello de botella NO es el algoritmo RL**: PPO+LSTM bajo este env, features y timeframe ha alcanzado su techo en `walk_forward_v1/fold_9` con Sharpe BTC +0.97 / ETH +1.76 sobre H1 2025.
+
+**Próxima vía: features / timeframe** — la conversación pivota fuera de RL:
+- Features: ¿qué información estaríamos perdiendo? (order book, on-chain, sentiment, cross-asset)
+- Timeframe: ¿1h hourly es el régimen correcto? (daily, 4h, 15m alternativas; cada uno cambia el ratio señal/ruido)
+- Env mechanics: posición continua en vez de discreta {-1, 0, +1}; sizing dinámico
+- Possibly: salir de end-to-end RL y volver a supervised forecast + rule-based execution
+
+### Artefactos preservados (NO borrar)
+
+- `models/{checkpoints,final}/walk_forward_v1/` — baseline canon.
+- `models/{checkpoints,final}/walk_forward_v2/fold_9/` — V2.1 trial completo (1.5M).
+- `models/{checkpoints,final}/bc_v1/fold_9/` — V2.2 BC pretrain + fine-tune parcial (220k antes de stop).
+- `logs/tensorboard/{walk_forward_v1,walk_forward_v2,bc_v1}/` — TB events para auditoría.
+
+Total wall-clock de los dos experimentos: ~9h35m (V2.1 trial + V2.2 BC + fine-tune). Findings sólidos, decisión RL agotado avalada por dos rutas independientes.
+
+---
+
 ## Backlog (V1.5+)
 
 ### Prioridad 1
